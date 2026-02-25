@@ -1,6 +1,6 @@
 [package]
 name = "shanan-cv"
-version = "0.1.7"
+version = "0.1.11"
 edition = "2024"
 authors = ["Johann Li <me@qinka.pro> @Qinka"]
 description = "A high-performance parallel computing computer vision library using CubeCL"
@@ -13,6 +13,7 @@ license = "Apache-2.0"
 [dependencies]
 cubecl = { version = "0.9" }
 thiserror = "2.0.18"
+tracing = "0.1"
 
 
 [features]
