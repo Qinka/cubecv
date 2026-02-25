@@ -112,7 +112,6 @@ where
     &self,
     client: &ComputeClient<R>,
     pred: &DataBuffer<R, F>,
-    // stride: F,
   ) -> Result<PPResult<R, F, I>, Yolo26BcError> {
     let [n, c, s] = *pred.shape() else {
       return Err(Yolo26BcError::InvalidInputShape(
@@ -160,11 +159,7 @@ where
 
     let bbox: DataBuffer<R, F> = DataBuffer::with_shape(&[n, 4, s], client);
     let stride = (self.width * self.height / s as u32) as f32;
-    println!(
-      "stride: {};; {:?}",
-      stride.sqrt(),
-      pred.shape().iter().collect::<Vec<_>>()
-    );
+
     bbox::launch::<F, R>(
       client,
       CubeCount::Static(count as u32, 1, 1),
