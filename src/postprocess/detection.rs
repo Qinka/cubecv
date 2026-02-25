@@ -11,5 +11,5 @@
 //
 // Copyright (C) 2026 Johann Li <me@qinka.pro>, Wareless Group
 
-mod yolo26_sbc;
-pub use yolo26_sbc::{Yolo26Sbc, Yolo26SbcConfig, Yolo26SbcError};
+mod yolo26_bc;
+pub use yolo26_bc::{Yolo26Bc, Yolo26BcConfig, Yolo26BcError};

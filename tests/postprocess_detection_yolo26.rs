@@ -14,47 +14,57 @@
 use std::vec;
 
 use cubecl::prelude::*;
-use shanan_cv::{data::DataBuffer, postprocess::detection::Yolo26SbcConfig};
-
-const N: usize = 1;
-const CLS: usize = 8;
-const H: usize = 20;
-const W: usize = 20;
+use shanan_cv::{data::DataBuffer, postprocess::detection::Yolo26BcConfig};
 
 #[cfg(feature = "cpu")]
 #[test]
-fn test_postprocess_detection_yolo26_cpu() {
-  test_postprocess_detection_yolo26::<cubecl::cpu::CpuRuntime>();
+fn test_postprocess_detection_yolo26_cpu_640_640_32() {
+  test_postprocess_detection_yolo26::<1, 80, 20, 20, 32, cubecl::cpu::CpuRuntime>();
 }
 
 #[cfg(feature = "wgpu")]
 #[test]
-fn test_postprocess_detection_yolo26_wgpu() {
-  test_postprocess_detection_yolo26::<cubecl::wgpu::WgpuRuntime>();
+fn test_postprocess_detection_yolo26_wgpu_640_640_32() {
+  test_postprocess_detection_yolo26::<1, 80, 20, 20, 32, cubecl::wgpu::WgpuRuntime>();
 }
 
-fn test_postprocess_detection_yolo26<R: Runtime>() {
-  let random_pred = {
-    let mut v: Vec<f32> = (0..N * (1 + 4 + CLS) * H * W)
-      .map(|_| rand::random::<f32>())
-      .collect();
 
-    // 设置 stride 为 32
-    let stride = 32.0;
-    for idx in 0..(N * (1 + 4 + CLS) * H * W) {
-      let c = (idx / (H * W)) % (1 + 4 + CLS);
-      if c == 0 {
-        v[idx] = stride; // anchor stride
-      }
-    }
-    v
-  };
+#[cfg(feature = "cpu")]
+#[test]
+fn test_postprocess_detection_yolo26_cpu_640_640_64() {
+  test_postprocess_detection_yolo26::<1, 80, 10, 10, 64, cubecl::cpu::CpuRuntime>();
+}
+
+#[cfg(feature = "wgpu")]
+#[test]
+fn test_postprocess_detection_yolo26_wgpu_640_640_64() {
+  test_postprocess_detection_yolo26::<1, 80, 10, 10, 64, cubecl::wgpu::WgpuRuntime>();
+}
+
+#[cfg(feature = "wgpu")]
+#[test]
+#[ignore = "给特殊场景下测试的"]
+fn test_postprocess_detection_yolo26_wgpu_640_640_160() {
+  test_postprocess_detection_yolo26::<1, 80, 4, 4, 160, cubecl::wgpu::WgpuRuntime>();
+}
+
+fn test_postprocess_detection_yolo26<
+  const N: usize,
+  const C: usize,
+  const H: usize,
+  const W: usize,
+  const S: usize,
+  R: Runtime,
+>() {
+  let random_pred: Vec<f32> = (0..N * (4 + C) * H * W)
+    .map(|_| rand::random::<f32>())
+    .collect();
 
   let (score_cubecl, index_cubecl, bbox_cubecl) =
-    run_postprocess_detection_yolo26_cubecl::<R>(random_pred.clone());
+    run_postprocess_detection_yolo26_cubecl::<R>(random_pred.clone(), N, C, H, W, S);
 
   let (score_manual, index_manual, bbox_manual) =
-    run_postprocess_detection_yolo26_manual(random_pred, N, CLS, H * W, 640, 640);
+    run_postprocess_detection_yolo26_manual(random_pred, N, C, S, W, H);
 
   println!("score_cubecl\n {:?}", score_cubecl);
   println!("score_manual\n {:?}", score_manual);
@@ -99,17 +109,21 @@ fn test_postprocess_detection_yolo26<R: Runtime>() {
 
 fn run_postprocess_detection_yolo26_cubecl<R: Runtime>(
   preds: Vec<f32>,
+  n: usize,
+  c: usize,
+  h: usize,
+  w: usize,
+  s: usize
 ) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
   let client = R::client(&R::Device::default());
-  let yolo26 = Yolo26SbcConfig::default()
-    .with_shape(640, 640)
+  let yolo26 = Yolo26BcConfig::default()
+    .with_shape((w * s) as u32, (h * s) as u32)
     .with_dim(256)
     .build()
     .unwrap();
 
-  let pred = DataBuffer::<R, f32>::from_slice(&preds, &[N, 5 + CLS, H * W], &client).unwrap();
+  let pred = DataBuffer::<R, f32>::from_slice(&preds, &[n, 4 + c, h * w], &client).unwrap();
 
-  // let stride = 32.0; // 假设步幅为32
   let result = yolo26.execute(&client, &pred);
   match result {
     Ok((score, index, bbox)) => {
@@ -130,74 +144,67 @@ fn run_postprocess_detection_yolo26_cubecl<R: Runtime>(
   }
 }
 
-/// preds: [n, 4+c, s]
+/// preds: [n, 4+c, w * s]
 fn run_postprocess_detection_yolo26_manual(
   preds: Vec<f32>,
   n: usize,
   c: usize,
   s: usize,
-  width: usize,
-  height: usize,
+  w: usize,
+  h: usize,
 ) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
   assert_eq!(n, 1);
 
-  let mut score_tensor = vec![0.0; n * s];
-  let mut index_tensor = vec![0u32; n * s];
-  let mut bbox_tensor = vec![0.0; n * 4 * s];
+  let width = w * s;
+  let height = h * s;
 
-  let spatial = s;
+  let mut score_tensor = vec![0.0; n * w * h];
+  let mut index_tensor = vec![0u32; n * w * h];
+  let mut bbox_tensor = vec![0.0; n * 4 * w * h];
 
-  for idx in 0..s {
+  let stride = s as f32;
+  let spatial = w * h;
+
+  for idx in 0..w * h {
     let (score, class_id) = {
       let mut max_logit = f32::MIN;
       let mut cls_idx = 0usize;
-      for c in 0..CLS as usize {
-        let c = c + 5; // 跳过前4个回归输出
-        let logit = preds[c * spatial + idx];
+      for i in 0..c as usize {
+        // 跳过前4个回归输出
+        let logit = preds[(i + 4) * spatial + idx];
         if logit > max_logit {
           max_logit = logit;
-          cls_idx = c - 5;
+          cls_idx = i;
         }
       }
       (sigmoid(max_logit), cls_idx as u32)
     };
 
-    let stride = preds[idx]; // anchor 对应的 stride
-    let cx = preds[idx + 1 * spatial]; // cx
-    let cy = preds[idx + 2 * spatial]; // cy
-    let cw = preds[idx + 3 * spatial]; // cw
-    let ch = preds[idx + 4 * spatial]; // ch
+    let cx = preds[idx]; // cx
+    let cy = preds[idx + spatial]; // cy
+    let cw = preds[idx + spatial * 2]; // cw
+    let ch = preds[idx + spatial * 3]; // ch
 
-    let w = idx % W;
-    let h = idx / W;
+    let w_idx = idx % w;
+    let h_idx = idx / w;
 
-    let grid_x = (w as f32) + 0.5;
-    let grid_y = (h as f32) + 0.5;
+    let grid_x = (w_idx as f32) + 0.5;
+    let grid_y = (h_idx as f32) + 0.5;
 
     let xmin = ((grid_x - cx) * stride).clamp(0.0, width as f32);
     let ymin = ((grid_y - cy) * stride).clamp(0.0, height as f32);
     let xmax = ((grid_x + cw) * stride).clamp(0.0, width as f32);
     let ymax = ((grid_y + ch) * stride).clamp(0.0, height as f32);
 
-    print!(
-      "idx: {}, score: {}, class_id: {}, stride: {}, bbox: ({}, {}, {}, {})\n",
-      idx,
-      score,
-      class_id,
-      stride,
-      xmin / width as f32,
-      ymin / height as f32,
-      xmax / width as f32,
-      ymax / height as f32
-    );
-
     score_tensor[idx] = score;
     index_tensor[idx] = class_id;
 
-    bbox_tensor[idx] = (xmin / width as f32).clamp(0.0, 1.0);
-    bbox_tensor[idx + s] = (ymin / height as f32).clamp(0.0, 1.0);
-    bbox_tensor[idx + 2 * s] = (xmax / width as f32).clamp(0.0, 1.0);
-    bbox_tensor[idx + 3 * s] = (ymax / height as f32).clamp(0.0, 1.0);
+    println!("{} {} {} {}", xmin, grid_x, cx, stride);
+
+    bbox_tensor[idx] = xmin;
+    bbox_tensor[idx + spatial] = ymin;
+    bbox_tensor[idx + 2 * spatial] = xmax;
+    bbox_tensor[idx + 3 * spatial] = ymax;
   }
 
   (score_tensor, index_tensor, bbox_tensor)

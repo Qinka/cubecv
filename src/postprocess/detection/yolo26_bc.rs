@@ -1,5 +1,5 @@
 // 该文件是 Shanan CV 项目的一部分。
-// src/postprocess/detection/yolo26_sbc.rs
+// src/postprocess/detection/yolo26_bc.rs
 // - 基于 stride - box - class—probs 格式的 Yolo26 后处理代码
 // - 尺寸应该是 [N, 1 + 4 + num_classes, S]，其中 1 是 anchor 的 stride，4 是边界框回归值，num_classes 是分类概率，
 // - S 是空间位置数量，是多个”分辨率“ 下的 anchors 的总和
@@ -21,19 +21,19 @@ use thiserror::Error;
 use crate::{data::DataBuffer, kernel::sigmoid};
 
 #[derive(Debug, Error)]
-pub enum Yolo26SbcError {
+pub enum Yolo26BcError {
   #[error("无效的输入形状: {0}")]
   InvalidInputShape(String),
   #[error("运行时错误: {0}")]
   LaunchError(#[from] LaunchError),
 }
-pub struct Yolo26SbcConfig {
+pub struct Yolo26BcConfig {
   width: u32,
   height: u32,
   dim: u32,
 }
 
-impl Default for Yolo26SbcConfig {
+impl Default for Yolo26BcConfig {
   fn default() -> Self {
     Self {
       width: 640,
@@ -43,20 +43,20 @@ impl Default for Yolo26SbcConfig {
   }
 }
 
-impl Yolo26SbcConfig {
+impl Yolo26BcConfig {
   pub fn with_shape(mut self, width: u32, height: u32) -> Self {
     self.width = width;
     self.height = height;
     self
   }
 
-  pub fn build<R, F, I>(self) -> Result<Yolo26Sbc<R, F, I>, Yolo26SbcError>
+  pub fn build<R, F, I>(self) -> Result<Yolo26Bc<R, F, I>, Yolo26BcError>
   where
     R: Runtime,
     F: Float + CubeElement,
     I: Int + CubeElement,
   {
-    Ok(Yolo26Sbc {
+    Ok(Yolo26Bc {
       width: self.width,
       height: self.height,
       dim: self.dim,
@@ -70,7 +70,20 @@ impl Yolo26SbcConfig {
   }
 }
 
-pub struct Yolo26Sbc<R, F, I>
+///
+/// 针对 Yolo26 的后处理实现。
+/// 这里，需要不同的下采样的结果分开处理（也就是 stride 得相同）
+/// 然后输入尺寸应该是 B x (4 + num_classes) x S，其中 B 是批量大小，S 是所有下采样的空间位置数量之和。
+/// 输出是三个张量：score (B x S)，index (B x S)，bbox (B x 4 x S)，分别是分类得分、类别索引和边界框坐标。
+/// 这里没有剔除低分框的操作，后续可以在 CPU 上进行根据 score 提取 index 和 bbox 中的信息。
+///
+/// 对于不同的 stride 的输出，可以分别输出到 `Self::execute` 中进行处理。
+/// 这里会自动计算 stride，是通过 S 和 输入图像尺寸计算得到的。(S / (width * height)).sqrt() 就是 anchor 的数量）
+/// 然后需要注意的是，使用这个库的时候，请先执行 `cargo test` 来测试一下，目前发现在某些平台上 vulkan 计算结果会有问题，导致错误。
+/// 然后现在 API 还在快速变化，所以，，一方面版本号最低为变动也可能导致 API 不兼容。
+/// 另一方面，欢迎大家提 issue 或者 PR 来完善这个库，目前还在快速迭代中，很多功能都在开发中。
+///
+pub struct Yolo26Bc<R, F, I>
 where
   R: Runtime,
   F: Float + CubeElement,
@@ -84,7 +97,7 @@ where
 
 pub type PPResult<R, F, I> = (DataBuffer<R, F>, DataBuffer<R, I>, DataBuffer<R, F>);
 
-impl<R, F, I> Yolo26Sbc<R, F, I>
+impl<R, F, I> Yolo26Bc<R, F, I>
 where
   R: Runtime,
   F: Float + CubeElement,
@@ -100,15 +113,16 @@ where
     client: &ComputeClient<R>,
     pred: &DataBuffer<R, F>,
     // stride: F,
-  ) -> Result<PPResult<R, F, I>, Yolo26SbcError> {
+  ) -> Result<PPResult<R, F, I>, Yolo26BcError> {
     let [n, c, s] = *pred.shape() else {
-      return Err(Yolo26SbcError::InvalidInputShape(
+      return Err(Yolo26BcError::InvalidInputShape(
         "分类结果张量形状不正确，预期为 [N, num_classes, S]".to_string(),
       ));
     };
 
+    tracing::debug!("输入形状: N={}, C={}, S={}", n, c, s);
     let cls: DataBuffer<R, F> = DataBuffer::with_shape(&[n, c - 4, s], client);
-    let reg: DataBuffer<R, F> = DataBuffer::with_shape(&[n, 5, s], client);
+    let reg: DataBuffer<R, F> = DataBuffer::with_shape(&[n, 4, s], client);
 
     let count = (n * s).div_ceil(self.dim as usize);
     split::launch::<F, R>(
@@ -145,6 +159,12 @@ where
     )?;
 
     let bbox: DataBuffer<R, F> = DataBuffer::with_shape(&[n, 4, s], client);
+    let stride = (self.width * self.height / s as u32) as f32;
+    println!(
+      "stride: {};; {:?}",
+      stride.sqrt(),
+      pred.shape().iter().collect::<Vec<_>>()
+    );
     bbox::launch::<F, R>(
       client,
       CubeCount::Static(count as u32, 1, 1),
@@ -153,6 +173,7 @@ where
       bbox.into_tensor_arg(1),
       ScalarArg::new(F::new(self.width as f32)),
       ScalarArg::new(F::new(self.height as f32)),
+      ScalarArg::new(F::new(stride.sqrt())),
     )?;
 
     Ok((score, index, bbox))
@@ -209,9 +230,9 @@ fn classify<F: Float, I: Int>(cls: Tensor<F>, score: &mut Tensor<F>, index: &mut
 }
 
 /// 将 yolo 检测的结果进行拆分
-/// 输入 pred 形状为 [N, 5 + num_classes, S]，顺序是 x, y, w, h, class_probs...
+/// 输入 pred 形状为 [N, 4 + num_classes, S]，顺序是 x, y, w, h, class_probs...
 /// 输出 cls 形状为 [N, num_classes, S]，reg 形状为 [N, 4, S]
-/// 输出 bbox 形状为 [N, 5, S]，包含 stride 和 边界框坐标 (s, x, y, w, h)
+/// 输出 bbox 形状为 [N, 4, S]，包含边界框坐标 (x, y, w, h)
 #[cube(launch)]
 fn split<F: Float>(pred: Tensor<F>, cls: &mut Tensor<F>, reg: &mut Tensor<F>) {
   // 输出张量总元素 = N * S
@@ -237,17 +258,17 @@ fn split<F: Float>(pred: Tensor<F>, cls: &mut Tensor<F>, reg: &mut Tensor<F>) {
     let base = n_idx * stride_n + s_idx * stride_s;
 
     // 拆分回归和分类结果
-    for c in 0..5 {
-      reg[base + c * reg.stride(1)] = pred[base + c * stride_c]; // 前5个通道是回归值
+    for c in 0..4 {
+      reg[base + c * reg.stride(1)] = pred[base + c * stride_c]; // 前4个通道是回归值
     }
-    for c in 5..c_dim {
-      cls[base + (c - 5) * cls.stride(1)] = pred[base + c * stride_c]; // 后续通道是分类概率
+    for c in 4..c_dim {
+      cls[base + (c - 4) * cls.stride(1)] = pred[base + c * stride_c]; // 后续通道是分类概率
     }
   }
 }
 
 /// 将 Yolo 检测结果中的回归指标进行处理，输出每个位置的边界框坐标
-/// reg: 输入回归结果，形状为 [N, 5, S], 包含 (s, cx, cy, w, h) 四个通道
+/// reg: 输入回归结果，形状为 [N, 4, S], 包含 (cx, cy, w, h) 四个通道
 /// bbox: 输出边界框坐标，形状为 [N, 4, S] 为 xmin, ymin, xmax, ymax
 #[cube(launch)]
 fn bbox<F: Float + CubeScalar + Zero>(
@@ -255,8 +276,8 @@ fn bbox<F: Float + CubeScalar + Zero>(
   bbox: &mut Tensor<F>,
   image_width: F,
   image_height: F,
+  stride: F,
 ) {
-  let one_value = F::new(comptime!(1.0));
   let half_value = F::new(comptime!(0.5));
   let zero_value = F::new(comptime!(0.0));
 
@@ -281,13 +302,12 @@ fn bbox<F: Float + CubeScalar + Zero>(
     // 计算 base offset (c=0 时的位置)
     let base = n_idx * stride_n + s_idx * stride_s;
 
-    let s = reg[base]; // c=0 是 anchor stride
-    let cx = reg[base + stride_c]; // c=1
-    let cy = reg[base + 2 * stride_c]; // c=2
-    let cw = reg[base + 3 * stride_c]; // c=3
-    let ch = reg[base + 4 * stride_c]; // c=4
+    let cx = reg[base]; // c=0
+    let cy = reg[base + stride_c]; // c=1
+    let cw = reg[base + stride_c * 2]; // c=2
+    let ch = reg[base + stride_c * 3]; // c=3
 
-    let www = image_width / s;
+    let www = image_width / stride;
 
     let w_idx = (F::cast_from(s_idx) % www).floor();
     let h_idx = (F::cast_from(s_idx) / www).floor();
@@ -295,16 +315,14 @@ fn bbox<F: Float + CubeScalar + Zero>(
     let grid_x = w_idx + half_value;
     let grid_y = h_idx + half_value;
 
-    let xmin = (grid_x - cx) * s;
-    let ymin = (grid_y - cy) * s;
-    let xmax = (grid_x + cw) * s;
-    let ymax = (grid_y + ch) * s;
+    let xmin = (grid_x - cx) * stride;
+    let ymin = (grid_y - cy) * stride;
+    let xmax = (grid_x + cw) * stride;
+    let ymax = (grid_y + ch) * stride;
 
-    let stride_c = bbox.stride(1);
-
-    bbox[base] = (xmin / image_width).clamp(zero_value, one_value); // xmin
-    bbox[base + stride_c] = (ymin / image_height).clamp(zero_value, one_value); // ymin
-    bbox[base + 2 * stride_c] = (xmax / image_width).clamp(zero_value, one_value); // xmax
-    bbox[base + 3 * stride_c] = (ymax / image_height).clamp(zero_value, one_value); // ymax
+    bbox[base] = xmin.clamp(zero_value, image_width); // xmin
+    bbox[base + stride_c] = ymin.clamp(zero_value, image_height); // ymin
+    bbox[base + 2 * stride_c] = xmax.clamp(zero_value, image_width); // xmax
+    bbox[base + 3 * stride_c] = ymax.clamp(zero_value, image_height); // ymax
   }
 }
