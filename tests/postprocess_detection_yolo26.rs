@@ -28,7 +28,6 @@ fn test_postprocess_detection_yolo26_wgpu_640_640_32() {
   test_postprocess_detection_yolo26::<1, 80, 20, 20, 32, cubecl::wgpu::WgpuRuntime>();
 }
 
-
 #[cfg(feature = "cpu")]
 #[test]
 fn test_postprocess_detection_yolo26_cpu_640_640_64() {
@@ -113,7 +112,7 @@ fn run_postprocess_detection_yolo26_cubecl<R: Runtime>(
   c: usize,
   h: usize,
   w: usize,
-  s: usize
+  s: usize,
 ) -> (Vec<f32>, Vec<u32>, Vec<f32>) {
   let client = R::client(&R::Device::default());
   let yolo26 = Yolo26BcConfig::default()
