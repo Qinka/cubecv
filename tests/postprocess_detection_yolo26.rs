@@ -75,7 +75,7 @@ fn test_postprocess_detection_yolo26<
 
   // println!("{:?}", random_pred);
 
-  let threshold = 0.725;
+  let threshold = 0.25;
 
   let (score_cubecl, index_cubecl, bbox_cubecl) =
     run_postprocess_detection_yolo26_cubecl::<R>(random_pred.clone(), N, C, H, W, S, threshold);
