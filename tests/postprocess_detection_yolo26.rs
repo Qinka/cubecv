@@ -16,7 +16,6 @@ use std::vec;
 use cubecl::prelude::*;
 use shanan_cv::{data::DataBuffer, postprocess::detection::Yolo26BcConfig};
 
-
 #[cfg(feature = "cpu")]
 #[test]
 fn test_postprocess_detection_yolo26_cpu_640_640_2() {
@@ -28,7 +27,6 @@ fn test_postprocess_detection_yolo26_cpu_640_640_2() {
 fn test_postprocess_detection_yolo26_wgpu_640_640_2() {
   test_postprocess_detection_yolo26::<1, 80, 20, 20, 2, cubecl::wgpu::WgpuRuntime>();
 }
-
 
 #[cfg(feature = "cpu")]
 #[test]

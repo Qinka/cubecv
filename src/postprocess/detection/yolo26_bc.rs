@@ -169,7 +169,7 @@ fn postprocess<F: Float + CubeScalar, I: Int>(
   let half_value = F::new(comptime!(0.5));
   let zero_value = F::new(comptime!(0.0));
 
-  let ns = pred.shape(0) * pred.shape(1);
+  let ns = pred.shape(0) * pred.shape(2);
   let idx = ABSOLUTE_POS;
 
   if idx < ns {
@@ -206,10 +206,10 @@ fn postprocess<F: Float + CubeScalar, I: Int>(
     };
 
     // 根据阈值填充矩阵并计算 bbox
+    score[idx] = best_val;
     if best_val > threshold {
       // 分类结果与阈值
       cls[idx] = I::cast_from(best_c);
-      score[idx] = best_val;
       // bbox
       let xmin = pred[base]; // c=0
       let ymin = pred[base + stride_c]; // c=1
