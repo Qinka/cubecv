@@ -17,4 +17,5 @@ pub mod data;
 pub mod image;
 pub mod postprocess;
 
+#[allow(unused_imports)]
 mod kernel;
