@@ -2615,7 +2615,7 @@ dependencies = [
 
 [[package]]
 name = "shanan-cv"
-version = "0.1.13"
+version = "0.1.17"
 dependencies = [
  "cubecl",
  "rand 0.10.0",

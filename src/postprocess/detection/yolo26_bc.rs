@@ -112,6 +112,7 @@ where
     &self,
     client: &ComputeClient<R>,
     pred: &DataBuffer<R, F>,
+    threshold: F,
   ) -> Result<PPResult<R, F, I>, Yolo26BcError> {
     let [n, c, s] = *pred.shape() else {
       return Err(Yolo26BcError::InvalidInputShape(
@@ -120,58 +121,378 @@ where
     };
 
     tracing::debug!("输入形状: N={}, C={}, S={}", n, c, s);
-    let cls: DataBuffer<R, F> = DataBuffer::with_shape(&[n, c - 4, s], client);
-    let reg: DataBuffer<R, F> = DataBuffer::with_shape(&[n, 4, s], client);
+    let cls: DataBuffer<R, I> = DataBuffer::with_shape(&[n, s], client);
+    let score: DataBuffer<R, F> = DataBuffer::with_shape(&[n, s], client);
+    let bbox: DataBuffer<R, F> = DataBuffer::with_shape(&[n, 4, s], client);
 
+    let stride = (self.width * self.height / s as u32) as f32;
     let count = (n * s).div_ceil(self.dim as usize);
-    split::launch::<F, R>(
+    postprocess::launch::<F, I, R>(
       client,
       CubeCount::Static(count as u32, 1, 1),
       CubeDim::new_1d(self.dim),
       pred.into_tensor_arg(1),
       cls.into_tensor_arg(1),
-      reg.into_tensor_arg(1),
-    )?;
-
-    let cls_sigmoid: DataBuffer<R, F> = cls.empty_like(client);
-
-    let count = (n * c * s).div_ceil(self.dim as usize);
-    sigmoid::launch::<F, R>(
-      client,
-      CubeCount::Static(count as u32, 1, 1),
-      CubeDim::new_1d(self.dim),
-      cls.into_tensor_arg(1),
-      cls_sigmoid.into_tensor_arg(1),
-    )?;
-
-    let score: DataBuffer<R, F> = DataBuffer::with_shape(&[n, s], client);
-    let index: DataBuffer<R, I> = DataBuffer::with_shape(&[n, s], client);
-
-    let count = (n * s).div_ceil(self.dim as usize);
-    classify::launch::<F, I, R>(
-      client,
-      CubeCount::Static(count as u32, 1, 1),
-      CubeDim::new_1d(self.dim),
-      cls_sigmoid.into_tensor_arg(1),
       score.into_tensor_arg(1),
-      index.into_tensor_arg(1),
-    )?;
-
-    let bbox: DataBuffer<R, F> = DataBuffer::with_shape(&[n, 4, s], client);
-    let stride = (self.width * self.height / s as u32) as f32;
-
-    bbox::launch::<F, R>(
-      client,
-      CubeCount::Static(count as u32, 1, 1),
-      CubeDim::new_1d(self.dim),
-      reg.into_tensor_arg(1),
       bbox.into_tensor_arg(1),
+      ScalarArg::new(threshold),
       ScalarArg::new(F::new(self.width as f32)),
       ScalarArg::new(F::new(self.height as f32)),
       ScalarArg::new(F::new(stride.sqrt())),
     )?;
 
-    Ok((score, index, bbox))
+    Ok((score, cls, bbox))
+
+
+
+    // let counter_handle = client.create_from_slice(u64::as_bytes(&[0u64]));
+
+    // let count = (n * s).div_ceil(self.dim as usize);
+    // split_and_classify::launch::<F, I, R>(
+    //   client,
+    //   CubeCount::Static(count as u32, 1, 1),
+    //   CubeDim::new_1d(self.dim),
+    //   pred.into_tensor_arg(1),
+    //   cls.into_tensor_arg(1),
+    //   score.into_tensor_arg(1),
+    //   reg.into_tensor_arg(1),
+    //   unsafe { ArrayArg::from_raw_parts::<u32>(&counter_handle, 1, 1) },
+    //   ScalarArg::new(threshold),
+    // )?;
+
+    // let count_bytes = client.read_one(counter_handle.clone());
+    // let out_rows = u32::from_bytes(&count_bytes)[0] as usize;
+
+    // if out_rows == 0 {
+    //   // 没有检测到任何目标，返回空结果
+    //   let empty_score = DataBuffer::with_shape(&[0], client);
+    //   let empty_index = DataBuffer::with_shape(&[0], client);
+    //   let empty_bbox = DataBuffer::with_shape(&[0, 4], client);
+    //   return Ok((empty_score, empty_index, empty_bbox));
+    // }
+
+    // let compact_cls = DataBuffer::with_shape(&[n, out_rows], client);
+    // let compact_score = DataBuffer::with_shape(&[n, out_rows], client);
+    // let compact_reg = DataBuffer::with_shape(&[n, 4, out_rows], client);
+
+    // let counter_handle = client.create_from_slice(u32::as_bytes(&[0u32]));
+    // compact_cls_score::launch::<F, I, R>(
+    //   client,
+    //   CubeCount::Static(count as u32, 1, 1),
+    //   CubeDim::new_1d(self.dim),
+    //   cls.into_tensor_arg(1),
+    //   score.into_tensor_arg(1),
+    //   compact_cls.into_tensor_arg(1),
+    //   compact_score.into_tensor_arg(1),
+    //   unsafe { ArrayArg::from_raw_parts::<u32>(&counter_handle, 1, 1) },
+    //   ScalarArg::new(threshold),
+    // )?;
+
+    // let counter_handle = client.create_from_slice(u64::as_bytes(&[0u64]));
+    // let stride = (self.width * self.height / s as u32) as f32;
+
+    // compact_bbox::launch::<F, R>(
+    //   client,
+    //   CubeCount::Static(count as u32, 1, 1),
+    //   CubeDim::new_1d(self.dim),
+    //   score.into_tensor_arg(1),
+    //   reg.into_tensor_arg(1),
+    //   compact_reg.into_tensor_arg(1),
+    //   unsafe { ArrayArg::from_raw_parts::<u32>(&counter_handle, 1, 1) },
+    //   ScalarArg::new(threshold),
+    //   ScalarArg::new(F::new(self.width as f32)),
+    //   ScalarArg::new(F::new(self.height as f32)),
+    //   ScalarArg::new(F::new(stride.sqrt())),
+    // )?;
+
+    // return Ok((compact_score, compact_cls, compact_reg));
+
+    // let cls_sigmoid: DataBuffer<R, F> = cls.empty_like(client);
+
+    // let count = (n * c * s).div_ceil(self.dim as usize);
+    // sigmoid::launch::<F, R>(
+    //   client,
+    //   CubeCount::Static(count as u32, 1, 1),
+    //   CubeDim::new_1d(self.dim),
+    //   cls.into_tensor_arg(1),
+    //   cls_sigmoid.into_tensor_arg(1),
+    // )?;
+
+    // let score: DataBuffer<R, F> = DataBuffer::with_shape(&[n, s], client);
+    // let index: DataBuffer<R, I> = DataBuffer::with_shape(&[n, s], client);
+
+    // let count = (n * s).div_ceil(self.dim as usize);
+    // classify::launch::<F, I, R>(
+    //   client,
+    //   CubeCount::Static(count as u32, 1, 1),
+    //   CubeDim::new_1d(self.dim),
+    //   cls_sigmoid.into_tensor_arg(1),
+    //   score.into_tensor_arg(1),
+    //   index.into_tensor_arg(1),
+    // )?;
+
+    // let bbox: DataBuffer<R, F> = DataBuffer::with_shape(&[n, 4, s], client);
+    // let stride = (self.width * self.height / s as u32) as f32;
+
+    // bbox::launch::<F, R>(
+    //   client,
+    //   CubeCount::Static(count as u32, 1, 1),
+    //   CubeDim::new_1d(self.dim),
+    //   reg.into_tensor_arg(1),
+    //   bbox.into_tensor_arg(1),
+    //   ScalarArg::new(F::new(self.width as f32)),
+    //   ScalarArg::new(F::new(self.height as f32)),
+    //   ScalarArg::new(F::new(stride.sqrt())),
+    // )?;
+
+    // Ok((score, index, bbox))
+  }
+}
+
+///
+/// 将 YOLO 中的检测结果进行分类并根据结果和阈值提取 bbox
+/// 输入 preds: 检测结果， 应当是 [N, (4 + num_class), S], 通道顺序为 x y w h class_probs...
+/// 输出 cls: 类别 [N, S]
+/// 输出 score: 类别对应的得分 [N, S]
+/// 输出 bbox: 盒子坐标 [N, 4, S], 包含边界坐标 [xmin, ymin, xmax, ymax]
+/// 输入 threshold：检测阈值; image_width x image_height: 图像阈值; stride: “anchor” 下采样
+///
+///
+#[cube(launch)]
+fn postprocess<F: Float + CubeScalar, I: Int>(
+  pred: Tensor<F>,
+  cls: &mut Tensor<I>,
+  score: &mut Tensor<F>,
+  bbox: &mut Tensor<F>,
+  threshold: F,
+  image_width: F,
+  image_height: F,
+  stride: F,
+) {
+  let one_value = F::new(comptime!(1.0));
+  let half_value = F::new(comptime!(0.5));
+  let zero_value = F::new(comptime!(0.0));
+
+  let ns = pred.shape(0) * pred.shape(1);
+  let idx = ABSOLUTE_POS;
+
+  if idx < ns {
+    // 获取输入维度
+    let c_dim = pred.shape(1);
+    let s_dim = pred.shape(2);
+
+    // 将 idx 映射回 (n, s)
+    // idx = n * S + s
+    let n_idx = idx / s_dim;
+    let s_idx = idx % s_dim;
+
+    // 输入 strides (支持任意 stride 布局)
+    let stride_n = pred.stride(0);
+    let stride_c = pred.stride(1);
+    let stride_s = pred.stride(2);
+
+    // 计算 base offset (c=0 时的位置)
+    let base = n_idx * stride_n + s_idx * stride_s;
+
+    // 计算最佳分类
+    let (best_c, best_val) = {
+      let mut best_c = 4;
+      let mut best_val = pred[base + 4 * stride_c];
+      for c in 5..c_dim {
+        let off = base + c * stride_c;
+        let v = pred[off];
+        if v > best_val {
+          best_val = v;
+          best_c = c;
+        }
+      }
+      (best_c - 4, one_value / (one_value + (-best_val).exp()))
+    };
+
+    // 根据阈值填充矩阵并计算 bbox
+    if best_val > threshold {
+      // 分类结果与阈值
+      cls[idx] = I::cast_from(best_c);
+      score[idx] = best_val;
+      // bbox
+      let xmin = pred[base]; // c=0
+      let ymin = pred[base + stride_c]; // c=1
+      let xmax = pred[base + stride_c * 2]; // c=2
+      let ymax = pred[base + stride_c * 3]; // c=3
+
+      let www = image_width / stride;
+
+      let w_idx = (F::cast_from(s_idx) % www).floor();
+      let h_idx = (F::cast_from(s_idx) / www).floor();
+
+      let grid_x = w_idx + half_value;
+      let grid_y = h_idx + half_value;
+
+      let xmin = (grid_x - xmin) * stride;
+      let ymin = (grid_y - ymin) * stride;
+      let xmax = (grid_x + xmax) * stride;
+      let ymax = (grid_y + ymax) * stride;
+
+      bbox[base] = xmin.clamp(zero_value, image_width); // xmin
+      bbox[base + stride_c] = ymin.clamp(zero_value, image_height); // ymin
+      bbox[base + 2 * stride_c] = xmax.clamp(zero_value, image_width); // xmax
+      bbox[base + 3 * stride_c] = ymax.clamp(zero_value, image_height); // ymax
+    }
+  }
+}
+
+/// 将 Yolo 中的检测结果进行分类和挑选处理
+/// pred: 检测网络原始的输入检测结果，形状为 [N, 4 + num_classes, S], 顺序为 x, y, w, h, class_probs
+/// cls: 输出分类结果，形状为 [N, S]
+/// score: 输出分类结果得分 [N, S]
+/// reg: 输出回归结果，形状为 [N, 4, S]
+#[cube(launch)]
+fn split_and_classify<F: Float + CubeScalar, I: Int>(
+  pred: Tensor<F>,
+  cls: &mut Tensor<I>,
+  score: &mut Tensor<F>,
+  reg: &mut Tensor<F>,
+  counter: &mut Array<Atomic<u32>>,
+  threshold: F,
+) {
+  let one = F::new(comptime!(1.0));
+  let ns = pred.shape(0) * pred.shape(2);
+  let idx = ABSOLUTE_POS;
+
+  if idx < ns {
+    // 获取输入维度
+    let c_dim = pred.shape(1);
+    let s_dim = pred.shape(2);
+
+    // 将 idx 映射回 (n, s)
+    let n_idx = idx / s_dim;
+    let s_idx = idx % s_dim;
+
+    // 输入 strides (支持任意 stride 布局)
+    let stride_n = pred.stride(0);
+    let stride_c = pred.stride(1);
+    let stride_s = pred.stride(2);
+
+    // 计算 base offset (c=0 时的位置)
+    let base = n_idx * stride_n + s_idx * stride_s;
+
+    // 计算类别
+    // 初始化: c=4 的值（第一个类别通道，前4个为回归值）
+    let mut best_c = 4;
+    let mut best_val = pred[base + 4 * stride_c];
+    for c in 5..c_dim {
+      let off = base + c * stride_c;
+      let v = pred[off];
+      if v > best_val {
+        best_val = v;
+        best_c = c;
+      }
+    }
+
+    let best_val = one / (one + (-best_val).exp());
+
+    if best_val >= threshold {
+      cls[idx] = I::cast_from(best_c - 4); // 转换为 0-based 类别索引
+      score[idx] = best_val;
+      for c in 0..4 {
+        reg[base + c * reg.stride(1)] = pred[base + c * stride_c]; // 前4个通道是回归值
+      }
+      counter[0].fetch_add(1);
+    }
+  }
+}
+
+/// ?将 Yolo 中的检测结果进行分类和挑选处理
+/// pred: 检测网络原始的输入检测结果，形状为 [N, 4 + num_classes, S], 顺序为 x, y, w, h, class_probs
+/// cls: 输出分类结果，形状为 [N, S]
+/// score: 输出分类结果得分 [N, S]
+/// reg: 输出回归结果，形状为 [N, 4, S]
+
+#[cube(launch)]
+fn compact_cls_score<F: Float + CubeScalar, I: Int>(
+  cls: Tensor<I>,
+  score: Tensor<F>,
+  compact_cls: &mut Tensor<I>,
+  compact_score: &mut Tensor<F>,
+  counter: &mut Array<Atomic<usize>>,
+  threshold: F,
+) {
+  let ns = cls.shape(0) * cls.shape(1);
+  let idx = ABSOLUTE_POS;
+
+  if idx < ns {
+    let n_idx = idx / cls.shape(1);
+    let s_idx = idx % cls.shape(1);
+
+    let base = n_idx * cls.stride(0) + s_idx * cls.stride(1);
+
+    let cls_val = cls[base];
+    let score_val = score[base];
+
+    if score_val > threshold {
+      let pos = counter[0].fetch_add(1);
+      compact_cls[pos] = cls_val;
+      compact_score[pos] = score_val;
+    }
+  }
+}
+
+#[cube(launch)]
+fn compact_bbox<F: Float + CubeScalar>(
+  score: Tensor<F>,
+  reg: Tensor<F>,
+  compact_reg: &mut Tensor<F>,
+  counter: &mut Array<Atomic<usize>>,
+  threshold: F,
+  image_width: F,
+  image_height: F,
+  stride: F,
+) {
+  let ns = reg.shape(0) * reg.shape(2);
+  let idx = ABSOLUTE_POS;
+
+  if idx < ns {
+    let n_idx = idx / reg.shape(2);
+    let s_idx = idx % reg.shape(2);
+
+    let base = n_idx * reg.stride(0) + s_idx * reg.stride(2);
+
+    let score_val = score[n_idx * score.stride(0) + s_idx * score.stride(1)];
+    if score_val > threshold {
+      // 这里假设 reg 中的 score 已经被 compact_cls_score 处理过了，只有满足条件的才会有对应的 bbox
+      // 因此我们直接将 reg 中的 bbox 信息写入 compact_bbox 中，位置由 counter 决定
+      let pos = counter[0].fetch_add(1);
+
+      let half_value = F::new(comptime!(0.5));
+      let zero_value = F::new(comptime!(0.0));
+
+      // let stride_n = reg.stride(0);
+      let stride_c = compact_reg.stride(1); // 使用 compact_reg 的 stride，而非 reg 的 stride
+      // let stride_s = reg.stride(2);
+
+      let cx = reg[base]; // c=0
+      let cy = reg[base + stride_c]; // c=1
+      let cw = reg[base + stride_c * 2]; // c=2
+      let ch = reg[base + stride_c * 3]; // c=3
+
+      let www = image_width / stride;
+
+      let w_idx = (F::cast_from(s_idx) % www).floor();
+      let h_idx = (F::cast_from(s_idx) / www).floor();
+
+      let grid_x = w_idx + half_value;
+      let grid_y = h_idx + half_value;
+
+      let xmin = (grid_x - cx) * stride;
+      let ymin = (grid_y - cy) * stride;
+      let xmax = (grid_x + cw) * stride;
+      let ymax = (grid_y + ch) * stride;
+
+      compact_reg[pos] = xmin.clamp(zero_value, image_width); // xmin
+      compact_reg[pos + stride_c] = ymin.clamp(zero_value, image_height); // ymin
+      compact_reg[pos + 2 * stride_c] = xmax.clamp(zero_value, image_width); // xmax
+      compact_reg[pos + 3 * stride_c] = ymax.clamp(zero_value, image_height); // ymax
+    }
   }
 }
 
